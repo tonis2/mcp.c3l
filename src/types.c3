@@ -1,61 +1,42 @@
 module mcp;
 
-import std::core::dstring;
+import std::collections::object;
 
-enum ContentType {
-	TEXT,
-	IMAGE,
-}
+<*
+ One tools/call. `args` is the parsed `params.arguments` object — null when
+ the call carried none — borrowed for the call's duration; do not free it.
 
-struct ContentItem {
-	ContentType type;
-	String text;
-	String data;       // base64 for IMAGE
-	String mime_type;  // e.g. "image/png"
-}
-
-struct ToolResult {
-	ContentItem[8] content;
-	usz content_len;
-	bool is_error;
-}
-
-alias ToolHandlerFn = fn ToolResult(String tool_name, String args, void* user_data);
+ Returns the tool's text payload, allocated from `mem` and freed by the
+ caller once the response is written. A fault becomes a JSON-RPC error
+ response carrying the fault's name, so a handler that validates input
+ should fault with a name an agent can act on.
+*>
+alias ToolHandlerFn = fn String?(Object* args, void* user_data);
 
 struct ToolDef {
 	String name;
 	String description;
-	String input_schema;  // Raw JSON for inputSchema
+	String input_schema;  // raw JSON, inserted verbatim into tools/list
 	ToolHandlerFn handler;
+	void* user_data;      // handed back to the handler untouched
+}
+
+<*
+ One resources/read. Returns the resource's text, allocated from `mem` and
+ freed by the caller. A fault becomes a JSON-RPC error response.
+*>
+alias ResourceHandlerFn = fn String?(void* user_data);
+
+struct ResourceDef {
+	String uri;
+	String name;
+	String description;
+	String mime_type;
+	ResourceHandlerFn handler;
 	void* user_data;
 }
 
 struct ServerInfo {
 	String name;
 	String version;
-}
-
-fn ToolResult text_result(String text)
-{
-	ToolResult r;
-	r.content[0] = { .type = TEXT, .text = text };
-	r.content_len = 1;
-	return r;
-}
-
-fn ToolResult error_result(String message)
-{
-	ToolResult r;
-	r.content[0] = { .type = TEXT, .text = message };
-	r.content_len = 1;
-	r.is_error = true;
-	return r;
-}
-
-fn ToolResult image_result(String base64_data, String mime_type)
-{
-	ToolResult r;
-	r.content[0] = { .type = IMAGE, .data = base64_data, .mime_type = mime_type };
-	r.content_len = 1;
-	return r;
 }

@@ -1,224 +1,282 @@
 module mcp;
 
+import std::collections::object;
 import std::core::dstring;
+import std::core::mem;
+import std::core::mem::allocator;
+import std::core::string;
+import std::encoding::json;
 
-fn void handle_message(Server* server, String message) @private
+const String DEFAULT_PROTOCOL_VERSION = "2024-11-05";
+
+const int PARSE_ERROR      = -32700;
+const int INVALID_REQUEST  = -32600;
+const int METHOD_NOT_FOUND = -32601;
+const int INVALID_PARAMS   = -32602;
+const int INTERNAL_ERROR   = -32603;
+
+<*
+ Dispatch one incoming JSON-RPC message and return the response.
+
+ The return is allocated from `mem`; the caller frees it. A notification (a
+ message with no `id`) gets no response, not even an error — the return is
+ then the EMPTY STRING LITERAL, not an allocation, so only free a non-empty
+ return. What "no response" means on the wire is the transport's call:
+ stdio writes nothing, HTTP answers 202 with an empty body.
+*>
+fn String Server.handle_message(&self, String message)
 {
-	uint request_id = 0;
-	DString method = dstring::new(mem);
-	defer method.free();
-
-	// Extract id
-	if (try id_pos = message.index_of(`"id"`))
+	Object*? parsed = json::parse(mem, message);
+	if (catch parsed)
 	{
-		if (try colon = message[id_pos..].index_of_char(':'))
-		{
-			String after = message[id_pos + colon + 1..];
-			request_id = parse_json_uint(after);
-		}
+		return error_message(null, PARSE_ERROR, "Parse error");
+	}
+	defer parsed.free();
+
+	if (!parsed.is_keyable())
+	{
+		return error_message(null, INVALID_REQUEST, "Invalid request: not a JSON object");
 	}
 
-	// Extract method
-	if (try method_pos = message.index_of(`"method"`))
+	Object* id = null;
+	if (try found = parsed.get("id"))
 	{
-		if (try colon = message[method_pos..].index_of_char(':'))
-		{
-			String after = message[method_pos + colon + 1..];
-			String val = extract_string_value(after);
-			method.append_bytes(val);
-		}
+		if (!found.is_null()) id = found;
 	}
 
-	String m = method.str_view();
+	String? method = parsed.get_string("method");
+	if (catch method)
+	{
+		return error_message(id, INVALID_REQUEST, "Invalid request: missing method");
+	}
 
-	if (m == "initialize")
+	if (id == null) return "";
+
+	switch (method)
 	{
-		handle_initialize(server, message, request_id);
-	}
-	else if (m == "notifications/initialized")
-	{
-		// No-op
-	}
-	else if (m == "tools/list")
-	{
-		handle_tools_list(server, request_id);
-	}
-	else if (m == "tools/call")
-	{
-		handle_tools_call(server, message, request_id);
-	}
-	else
-	{
-		DString resp = dstring::new(mem);
-		defer resp.free();
-		resp.appendf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32601,"message":"Method not found"}}`, request_id);
-		send_message(resp.str_view());
+		case "initialize":     return self.on_initialize(parsed, id);
+		case "ping":           return result_message(id, "{}");
+		case "tools/list":     return self.on_tools_list(id);
+		case "tools/call":     return self.on_tools_call(parsed, id);
+		case "resources/list": return self.on_resources_list(id);
+		case "resources/read": return self.on_resources_read(parsed, id);
+		default:
+			String text = string::format(mem, "Method not found: %s", method);
+			defer alloc::free(mem, text);
+			return error_message(id, METHOD_NOT_FOUND, text);
 	}
 }
 
-fn void handle_initialize(Server* server, String message, uint id) @private
+fn String Server.on_initialize(&self, Object* request, Object* id)
 {
-	// Extract protocol version from request
-	DString proto_ver = dstring::new(mem);
-	defer proto_ver.free();
-	if (try pos = message.index_of(`"protocolVersion"`))
+	// Echo the client's protocol version back; default to the oldest spoken.
+	String version = DEFAULT_PROTOCOL_VERSION;
+	if (try params = request.get("params"))
 	{
-		if (try colon = message[pos..].index_of_char(':'))
+		if (params.is_keyable())
 		{
-			String after = message[pos + colon + 1..];
-			String val = extract_string_value(after);
-			proto_ver.append_bytes(val);
+			if (try given = params.get_string("protocolVersion")) version = given;
 		}
 	}
-	if (proto_ver.str_view().len == 0)
-	{
-		proto_ver.appendf("2024-11-05");
-	}
 
-	DString resp = dstring::new(mem);
-	defer resp.free();
-	resp.appendf(`{"jsonrpc":"2.0","id":%d,"result":`, id);
-	resp.appendf(`{"protocolVersion":"%s",`, proto_ver.str_view());
-	resp.appendf(`"capabilities":{"tools":{}},`);
-	resp.appendf(`"serverInfo":{"name":"`);
-	json_escape_into(&resp, server.info.name);
-	resp.appendf(`","version":"`);
-	json_escape_into(&resp, server.info.version);
-	resp.appendf(`"}}}`);
-	send_message(resp.str_view());
+	DString out = dstring::new(mem);
+	defer out.free();
+	append_open(&out, id);
+	out.append_string(`"result":{"protocolVersion":"`);
+	json_escape_into(&out, version);
+	out.append_string(`","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"`);
+	json_escape_into(&out, self.info.name);
+	out.append_string(`","version":"`);
+	json_escape_into(&out, self.info.version);
+	out.append_string(`"}}}`);
+	return out.copy_str(mem);
 }
 
-fn void handle_tools_list(Server* server, uint id) @private
+fn String Server.on_tools_list(&self, Object* id)
 {
-	DString resp = dstring::new(mem);
-	defer resp.free();
-	resp.appendf(`{"jsonrpc":"2.0","id":%d,"result":{"tools":[`, id);
-
-	for (usz i = 0; i < server.tools_len; i++)
+	DString out = dstring::new(mem);
+	defer out.free();
+	append_open(&out, id);
+	out.append_string(`"result":{"tools":[`);
+	for (usz i = 0; i < self.tools_len; i++)
 	{
-		if (i > 0) resp.appendf(",");
-		ToolDef* tool = &server.tools[i];
-		resp.appendf(`{"name":"`);
-		json_escape_into(&resp, tool.name);
-		resp.appendf(`","description":"`);
-		json_escape_into(&resp, tool.description);
-		resp.appendf(`","inputSchema":`);
-		resp.appendf("%s", tool.input_schema);
-		resp.appendf("}");
+		if (i > 0) out.append_char(',');
+		ToolDef* tool = &self.tools[i];
+		out.append_string(`{"name":"`);
+		json_escape_into(&out, tool.name);
+		out.append_string(`","description":"`);
+		json_escape_into(&out, tool.description);
+		out.append_string(`","inputSchema":`);
+		out.append_string(tool.input_schema.len > 0 ? tool.input_schema : "{}");
+		out.append_char('}');
 	}
-
-	resp.appendf(`]}}`);
-	send_message(resp.str_view());
+	out.append_string(`]}}`);
+	return out.copy_str(mem);
 }
 
-fn void handle_tools_call(Server* server, String message, uint id) @private
+fn String Server.on_tools_call(&self, Object* request, Object* id)
 {
-	// Extract tool name from params.name
-	DString tool_name_buf = dstring::new(mem);
-	defer tool_name_buf.free();
+	Object*? params = request.get("params");
+	if (catch params) return error_message(id, INVALID_PARAMS, "Invalid params: expected an object with name and arguments");
+	if (!params.is_keyable()) return error_message(id, INVALID_PARAMS, "Invalid params: expected an object with name and arguments");
 
-	if (try params_pos = message.index_of(`"params"`))
+	String? name = params.get_string("name");
+	if (catch name)
 	{
-		String params_section = message[params_pos..];
-		if (try name_pos = params_section.index_of(`"name"`))
+		return error_message(id, INVALID_PARAMS, "Invalid params: missing tool name");
+	}
+
+	Object* args = null;
+	if (try given = params.get("arguments"))
+	{
+		if (!given.is_keyable())
 		{
-			if (try colon = params_section[name_pos..].index_of_char(':'))
-			{
-				String after = params_section[name_pos + colon + 1..];
-				String val = extract_string_value(after);
-				tool_name_buf.append_bytes(val);
-			}
+			return error_message(id, INVALID_PARAMS, "Invalid params: arguments must be an object");
 		}
+		args = given;
 	}
 
-	// Extract arguments
-	DString args = dstring::new(mem);
-	defer args.free();
-	if (try args_pos = message.index_of(`"arguments"`))
+	for (usz i = 0; i < self.tools_len; i++)
 	{
-		if (try colon = message[args_pos..].index_of_char(':'))
+		ToolDef* tool = &self.tools[i];
+		if (tool.name != name) continue;
+
+		String? payload = tool.handler(args, tool.user_data);
+		if (catch error = payload)
 		{
-			String after = message[args_pos + colon + 1..];
-			String val = extract_object_value(after);
-			args.append_bytes(val);
+			String text = string::format(mem, "%s", error);
+			defer alloc::free(mem, text);
+			return error_message(id, INTERNAL_ERROR, text);
 		}
-	}
-	else
-	{
-		args.appendf("{}");
+		defer alloc::free(mem, payload);
+
+		DString out = dstring::new(mem);
+		defer out.free();
+		append_open(&out, id);
+		out.append_string(`"result":{"content":[{"type":"text","text":"`);
+		json_escape_into(&out, payload);
+		out.append_string(`"}]}}`);
+		return out.copy_str(mem);
 	}
 
-	String tool_name = tool_name_buf.str_view();
+	String text = string::format(mem, "Unknown tool: %s", name);
+	defer alloc::free(mem, text);
+	return error_message(id, INVALID_PARAMS, text);
+}
 
-	// Find the tool
-	ToolDef* found_tool = null;
-	for (usz i = 0; i < server.tools_len; i++)
+fn String Server.on_resources_list(&self, Object* id)
+{
+	DString out = dstring::new(mem);
+	defer out.free();
+	append_open(&out, id);
+	out.append_string(`"result":{"resources":[`);
+	for (usz i = 0; i < self.resources_len; i++)
 	{
-		if (server.tools[i].name == tool_name)
+		if (i > 0) out.append_char(',');
+		ResourceDef* resource = &self.resources[i];
+		out.append_string(`{"uri":"`);
+		json_escape_into(&out, resource.uri);
+		out.append_string(`","name":"`);
+		json_escape_into(&out, resource.name);
+		out.append_string(`","description":"`);
+		json_escape_into(&out, resource.description);
+		out.append_string(`","mimeType":"`);
+		json_escape_into(&out, resource.mime_type);
+		out.append_string(`"}`);
+	}
+	out.append_string(`]}}`);
+	return out.copy_str(mem);
+}
+
+fn String Server.on_resources_read(&self, Object* request, Object* id)
+{
+	Object*? params = request.get("params");
+	if (catch params) return error_message(id, INVALID_PARAMS, "Invalid params: expected an object with a uri");
+	if (!params.is_keyable()) return error_message(id, INVALID_PARAMS, "Invalid params: expected an object with a uri");
+
+	String? uri = params.get_string("uri");
+	if (catch uri)
+	{
+		return error_message(id, INVALID_PARAMS, "Invalid params: missing resource uri");
+	}
+
+	for (usz i = 0; i < self.resources_len; i++)
+	{
+		ResourceDef* resource = &self.resources[i];
+		if (resource.uri != uri) continue;
+
+		String? text = resource.handler(resource.user_data);
+		if (catch error = text)
 		{
-			found_tool = &server.tools[i];
-			break;
+			String message = string::format(mem, "%s", error);
+			defer alloc::free(mem, message);
+			return error_message(id, INTERNAL_ERROR, message);
 		}
+		defer alloc::free(mem, text);
+
+		DString out = dstring::new(mem);
+		defer out.free();
+		append_open(&out, id);
+		out.append_string(`"result":{"contents":[{"uri":"`);
+		json_escape_into(&out, resource.uri);
+		out.append_string(`","mimeType":"`);
+		json_escape_into(&out, resource.mime_type);
+		out.append_string(`","text":"`);
+		json_escape_into(&out, text);
+		out.append_string(`"}]}}`);
+		return out.copy_str(mem);
 	}
 
-	if (found_tool == null)
+	String text = string::format(mem, "Unknown resource: %s", uri);
+	defer alloc::free(mem, text);
+	return error_message(id, INVALID_PARAMS, text);
+}
+
+// The fixed head of every response: {"jsonrpc":"2.0","id":<id>,
+fn void append_open(DString* out, Object* id) @private
+{
+	out.append_string(`{"jsonrpc":"2.0","id":`);
+	write_id(out, id);
+	out.append_char(',');
+}
+
+// The id is echoed back exactly as it arrived: strings re-quoted and
+// escaped, numbers and bools printed by Object's own JSON form.
+fn void write_id(DString* out, Object* id) @private
+{
+	if (id == null || id.is_null())
 	{
-		send_error_response(id, "Unknown tool");
+		out.append_string("null");
 		return;
 	}
-
-	// Call handler
-	ToolResult result = found_tool.handler(tool_name, args.str_view(), found_tool.user_data);
-
-	// Format response
-	format_tool_response(id, &result);
+	if (id.is_string())
+	{
+		out.append_char('"');
+		json_escape_into(out, id.s);
+		out.append_char('"');
+		return;
+	}
+	out.appendf("%s", id);
 }
 
-fn void format_tool_response(uint id, ToolResult* result) @private
+fn String result_message(Object* id, String raw_result) @private
 {
-	DString resp = dstring::new(mem);
-	defer resp.free();
-
-	resp.appendf(`{"jsonrpc":"2.0","id":%d,"result":{"content":[`, id);
-
-	for (usz i = 0; i < result.content_len; i++)
-	{
-		if (i > 0) resp.appendf(",");
-		ContentItem* item = &result.content[i];
-
-		switch (item.type)
-		{
-			case TEXT:
-				resp.appendf(`{"type":"text","text":"`);
-				json_escape_into(&resp, item.text);
-				resp.appendf(`"}`);
-			case IMAGE:
-				resp.appendf(`{"type":"image","data":"`);
-				resp.appendf("%s", item.data);
-				resp.appendf(`","mimeType":"`);
-				json_escape_into(&resp, item.mime_type);
-				resp.appendf(`"}`);
-		}
-	}
-
-	if (result.is_error)
-	{
-		resp.appendf(`],"isError":true}}`);
-	}
-	else
-	{
-		resp.appendf(`]}}`);
-	}
-
-	send_message(resp.str_view());
+	DString out = dstring::new(mem);
+	defer out.free();
+	append_open(&out, id);
+	out.append_string(`"result":`);
+	out.append_string(raw_result);
+	out.append_char('}');
+	return out.copy_str(mem);
 }
 
-fn void send_error_response(uint id, String message) @private
+fn String error_message(Object* id, int code, String message) @private
 {
-	DString resp = dstring::new(mem);
-	defer resp.free();
-	resp.appendf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32603,"message":"`);
-	json_escape_into(&resp, message);
-	resp.appendf(`"}}`);
-	send_message(resp.str_view());
+	DString out = dstring::new(mem);
+	defer out.free();
+	append_open(&out, id);
+	out.appendf(`"error":{"code":%d,"message":"`, code);
+	json_escape_into(&out, message);
+	out.append_string(`"}}`);
+	return out.copy_str(mem);
 }
