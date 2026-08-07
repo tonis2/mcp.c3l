@@ -141,9 +141,13 @@ fn String Server.on_tools_call(&self, Object* request, Object* id)
 		ToolDef* tool = &self.tools[i];
 		if (tool.name != name) continue;
 
-		String? payload = tool.handler(args, tool.user_data);
+		DString detail = dstring::new(mem);
+		defer detail.free();
+
+		String? payload = tool.handler(args, tool.user_data, &detail);
 		if (catch error = payload)
 		{
+			if (detail.len() > 0) return error_message(id, INTERNAL_ERROR, detail.str_view());
 			String text = string::format(mem, "%s", error);
 			defer alloc::free(mem, text);
 			return error_message(id, INTERNAL_ERROR, text);

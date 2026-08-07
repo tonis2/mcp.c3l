@@ -23,9 +23,9 @@ import std::collections::object;
 import std::core::mem;
 
 // Returns the tool's payload allocated from `mem`; the caller frees it. A
-// fault becomes a JSON-RPC error carrying the fault's name, so fault with
-// something an agent can act on.
-fn String? handle_greet(Object* args, void* user_data)
+// fault becomes a JSON-RPC error, carrying whatever was written to `detail`
+// or the fault's own name when nothing was.
+fn String? handle_greet(Object* args, void* user_data, DString* detail)
 {
     return "Hello from C3!".copy(mem);
 }
@@ -115,12 +115,14 @@ ToolDef {
     String name;            // Tool name
     String description;     // Shown to the LLM
     String input_schema;    // JSON Schema, inserted verbatim into tools/list
-    ToolHandlerFn handler;  // fn String?(Object* args, void* user_data)
+    ToolHandlerFn handler;  // fn String?(Object* args, void* user_data, DString* detail)
     void* user_data;        // Handed back to the handler untouched
 }
 ```
 
-`args` is the parsed `params.arguments` — null when the call carried none — borrowed for the call. The handler returns its payload allocated from `mem`; a fault becomes a JSON-RPC error carrying the fault's name.
+`args` is the parsed `params.arguments` — null when the call carried none — borrowed for the call. The handler returns its payload allocated from `mem`.
+
+A fault becomes a JSON-RPC error. Its message is whatever the handler left in `detail`, and the fault's own name when it left nothing — telling a model which value was rejected and what would have been accepted is the difference between a retry that works and one that guesses again. `detail` is never null, arrives empty, and is ignored unless the handler faults.
 
 ### Resources
 
