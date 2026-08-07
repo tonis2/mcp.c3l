@@ -3,6 +3,7 @@ module mcp;
 import std::io;
 import std::core::dstring;
 import std::core::mem;
+import std::core::mem::allocator;
 import std::core::string;
 
 <*
@@ -30,8 +31,8 @@ struct Incoming
 {
 	Framing framing;
 
-	// The JSON, allocated from `mem` — the caller frees it. Empty on EOF, and
-	// on an HTTP request that carried no body.
+	// The JSON, allocated from the allocator handed to `read_request` — the
+	// caller frees it. Empty on EOF, and on an HTTP request that carried no body.
 	String body;
 
 	// An HTTP request that is not a POST. There is nothing to hand a server, and
@@ -49,8 +50,10 @@ struct Incoming
  Content-Length bytes.
 
  A zero-length body with nothing refused is EOF.
+
+ @param allocator : `Where the body is allocated. Name one explicitly when the buffer is freed on a different thread than this call runs on: the default is per-thread, so the two sides would otherwise be different allocators.`
 *>
-fn Incoming read_request(InStream stream)
+fn Incoming read_request(InStream stream, Allocator allocator = mem)
 {
 	DString first = dstring::new(mem);
 	defer first.free();
@@ -70,7 +73,7 @@ fn Incoming read_request(InStream stream)
 		}
 		usz length = read_headers(stream);
 		if (length == 0) return { .framing = HTTP };
-		return { .framing = HTTP, .body = read_body(stream, length) };
+		return { .framing = HTTP, .body = read_body(stream, length, allocator) };
 	}
 
 	if (line.contains("Content-Length:"))
@@ -82,25 +85,25 @@ fn Incoming read_request(InStream stream)
 		}
 		if (length == 0) return {};
 		read_headers(stream);
-		return { .body = read_body(stream, length) };
+		return { .body = read_body(stream, length, allocator) };
 	}
 
-	return { .body = first.copy_str(mem) };
+	return { .body = first.copy_str(allocator) };
 }
 
 <*
  Read one message from the stream: a bare JSON line, one Content-Length framed
- message, or the body of an HTTP request. Returns the message allocated from
- `mem` — the caller frees it — or the empty string on EOF.
+ message, or the body of an HTTP request. Returns the message — the caller frees
+ it — or the empty string on EOF.
 
  The framing is dropped on the floor, so this is for a caller that answers the
  same way whatever arrives: stdin, or a response coming back over a socket
  that was written as a line. A server that has to answer in kind wants
  `read_request`.
 *>
-fn String read_message(InStream stream)
+fn String read_message(InStream stream, Allocator allocator = mem)
 {
-	return read_request(stream).body;
+	return read_request(stream, allocator).body;
 }
 
 <*
@@ -191,8 +194,10 @@ fn usz read_headers(InStream stream) @private
 	}
 }
 
-// Exactly `length` bytes, or the empty string if the stream ends first.
-fn String read_body(InStream stream, usz length) @private
+// Exactly `length` bytes, or the empty string if the stream ends first. Only the
+// returned copy comes from `allocator`; the read buffer is scratch that never
+// leaves this call.
+fn String read_body(InStream stream, usz length, Allocator allocator) @private
 {
 	char[] body = mem::new_array(char, (sz)length);
 	defer mem::free(body);
@@ -204,5 +209,5 @@ fn String read_body(InStream stream, usz length) @private
 		if (n == 0) return "";
 		read_so_far += n;
 	}
-	return ((String)body[:length]).copy(mem);
+	return ((String)body[:length]).copy(allocator);
 }

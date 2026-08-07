@@ -21,6 +21,7 @@ import std::net::tcp;
 import std::thread;
 import std::core::mem;
 import std::core::mem::allocator;
+import std::core::mem::allocators;
 
 // Requests held while the application is busy. A queue this deep is already
 // generous for one client asking one question at a time; past it the answer is
@@ -38,8 +39,9 @@ alias WakeFn = fn void(void* ctx);
 
 // One accepted request: the connection it came in on, the message read off it,
 // and the framing it arrived in — which decides how the answer is written, and
-// so has to travel with it. The message is allocated from `mem` by the listener
-// thread and freed by whoever answers it.
+// so has to travel with it. The message is allocated by the listener thread and
+// freed by whoever answers it, so it comes from `Listener.wire` rather than from
+// `mem`, which is a different allocator on each of the two threads.
 struct Pending @private
 {
 	TcpSocket socket;
@@ -65,6 +67,22 @@ struct Listener
 	usz count;
 	WakeFn wake;
 	void* wake_ctx;
+
+	<*
+	 Where a queued message is allocated and freed.
+
+	 A message is read on the listener thread and released on the application's,
+	 and `mem` names a different allocator on each — it is per-thread, and an
+	 application that installs one of its own installs it only on the thread that
+	 asked. Freeing there what was allocated here is then a release against an
+	 allocator that never issued the pointer: undefined at best, and caught
+	 outright by a checking allocator.
+
+	 So both sides name this one instead, and it must stay thread-safe and
+	 reachable from both. `start` sets it to the process-wide libc allocator.
+	*>
+	Allocator wire;
+
 	int port;
 	bool running; // guarded by `mutex`: the thread's "keep going" flag
 	bool started;
@@ -81,13 +99,16 @@ struct Listener
  @param port : `The TCP port to listen on. Loopback only — this binds 127.0.0.1.`
  @param wake : `Poked from the listener thread once a request is queued; null for an application that polls.`
  @param wake_ctx : `Handed to the wake function untouched.`
+ @param wire : `Where queued messages live; see Listener.wire. Must be thread-safe and reachable from both threads, which rules out anything per-thread.`
 *>
-fn void? Listener.start(&self, int port, WakeFn wake = null, void* wake_ctx = null)
+fn void? Listener.start(&self, int port, WakeFn wake = null, void* wake_ctx = null,
+	Allocator wire = &allocators::LIBC_ALLOCATOR)
 {
 	self.server = tcp::listen("127.0.0.1", port, 8, SocketOption.REUSEADDR)!;
 	self.port = port;
 	self.wake = wake;
 	self.wake_ctx = wake_ctx;
+	self.wire = wire;
 	self.head = 0;
 	self.count = 0;
 	self.mutex.init()!;
@@ -144,7 +165,7 @@ fn usz Listener.pump(&self, Server* server)
 		if (!taken) break;
 
 		String response = server.handle_message(job.message);
-		alloc::free(mem, job.message);
+		alloc::free(self.wire, job.message);
 		answer(job.socket, response, job.framing);
 		if (response.len > 0) alloc::free(mem, response);
 		handled++;
@@ -184,7 +205,7 @@ fn void Listener.stop(&self)
 		Pending job = self.queue[self.head];
 		self.head = (self.head + 1) % MAX_PENDING;
 		self.count--;
-		alloc::free(mem, job.message);
+		alloc::free(self.wire, job.message);
 		(void)job.socket.close();
 	}
 
@@ -218,7 +239,7 @@ fn int accept_loop(void* arg) @private
 			break;
 		}
 
-		Incoming request = read_request(&socket);
+		Incoming request = read_request(&socket, self.wire);
 		if (request.refused)
 		{
 			(void)socket.write(http_refusal());
@@ -233,7 +254,7 @@ fn int accept_loop(void* arg) @private
 
 		if (!self.offer({ .socket = socket, .message = request.body, .framing = request.framing }))
 		{
-			alloc::free(mem, request.body);
+			alloc::free(self.wire, request.body);
 			String busy = error_message(null, INTERNAL_ERROR, "Server busy: too many requests in flight");
 			answer(socket, busy, request.framing);
 			alloc::free(mem, busy);
