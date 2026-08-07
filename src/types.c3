@@ -8,7 +8,8 @@ import std::core::dstring;
  the call carried none — borrowed for the call's duration; do not free it.
 
  Returns the tool's text payload, allocated from `mem` and freed by the
- caller once the response is written.
+ caller once the response is written — or the whole content array, when the
+ tool was registered with `raw_content`.
 
  A fault becomes a JSON-RPC error response. Its message is whatever the
  handler left in `detail`, and the fault's own name when it left nothing:
@@ -25,6 +26,22 @@ struct ToolDef {
 	String input_schema;  // raw JSON, inserted verbatim into tools/list
 	ToolHandlerFn handler;
 	void* user_data;      // handed back to the handler untouched
+
+	<*
+	 Whether the handler returns the `content` array itself rather than the text
+	 to put in one.
+
+	 Off is the ordinary tool: the payload is escaped into a single text block,
+	 which is every answer that is words or JSON. On is for a tool whose answer
+	 is not text at all — an image block carries base64 in a `data` member beside
+	 a `mimeType`, and escaping that structure into a text block would deliver
+	 the characters of the JSON instead of the JSON.
+
+	 A raw handler's payload is spliced into the response verbatim, so it must be
+	 a well-formed JSON array of content blocks. Nothing here validates it: a
+	 malformed one is a malformed response.
+	*>
+	bool raw_content;
 }
 
 <*

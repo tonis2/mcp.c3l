@@ -156,6 +156,34 @@ fn String http_refusal()
 	return "HTTP/1.1 405 Method Not Allowed\r\nAllow: POST\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 }
 
+<*
+ Write all of `bytes`, however many writes that takes.
+
+ A socket write takes what it has room for and reports how much; only a caller
+ that loops has written the whole buffer. Stopping at the first short write
+ truncates the JSON mid-token, and a client reads that as a malformed response
+ rather than as a partial one — the same failure as a server that crashed, and
+ far harder to place.
+
+ It matters because the answers are no longer all small: an image block carries
+ a few hundred kilobytes of base64, well past what a send buffer holds in one
+ go, so a short write here is an ordinary event rather than a pathological one.
+
+ @return `False when the stream stopped taking bytes before the end.`
+*>
+fn bool write_all(OutStream stream, String bytes) @private
+{
+	usz written = 0;
+	while (written < bytes.len)
+	{
+		sz? taken = stream.write((char[])bytes[written..]);
+		if (catch taken) return false;
+		if (taken <= 0) return false;
+		written += (usz)taken;
+	}
+	return true;
+}
+
 // ---------------------------------------------------------------------------
 
 // One CRLF- or LF-terminated line, minus the terminator. False on EOF.

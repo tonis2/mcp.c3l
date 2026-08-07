@@ -117,12 +117,20 @@ ToolDef {
     String input_schema;    // JSON Schema, inserted verbatim into tools/list
     ToolHandlerFn handler;  // fn String?(Object* args, void* user_data, DString* detail)
     void* user_data;        // Handed back to the handler untouched
+    bool raw_content;       // Handler returns the content array, not the text for one
 }
 ```
 
 `args` is the parsed `params.arguments` — null when the call carried none — borrowed for the call. The handler returns its payload allocated from `mem`.
 
 A fault becomes a JSON-RPC error. Its message is whatever the handler left in `detail`, and the fault's own name when it left nothing — telling a model which value was rejected and what would have been accepted is the difference between a retry that works and one that guesses again. `detail` is never null, arrives empty, and is ignored unless the handler faults.
+
+`raw_content` is for a tool whose answer is not text. Off — the default — the payload is escaped into one text block. On, it is spliced in as the `content` array verbatim, which is the only way to return anything else: an image block carries base64 in a `data` member beside a `mimeType`, and escaping that structure into a text block delivers the characters of the JSON rather than the JSON. A raw handler owns the array's well-formedness; nothing validates it.
+
+```c3
+// A raw handler's payload
+`[{"type":"image","mimeType":"image/png","data":"iVBORw0KGgo..."}]`
+```
 
 ### Resources
 

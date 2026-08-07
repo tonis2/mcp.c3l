@@ -309,11 +309,11 @@ fn void answer(TcpSocket socket, String response, Framing framing) @private
 	{
 		String http = http_response(response);
 		defer alloc::free(mem, http);
-		(void)writable.write(http);
+		write_all(&writable, http);
 		return;
 	}
 
 	if (response.len == 0) return;
-	if (catch writable.write(response)) return;
-	(void)writable.write("\n");
+	if (!write_all(&writable, response)) return;
+	write_all(&writable, "\n");
 }

@@ -157,9 +157,19 @@ fn String Server.on_tools_call(&self, Object* request, Object* id)
 		DString out = dstring::new(mem);
 		defer out.free();
 		append_open(&out, id);
-		out.append_string(`"result":{"content":[{"type":"text","text":"`);
-		json_escape_into(&out, payload);
-		out.append_string(`"}]}}`);
+		out.append_string(`"result":{"content":`);
+		if (tool.raw_content)
+		{
+			// The handler built the blocks itself; see ToolDef.raw_content.
+			out.append_string(payload);
+		}
+		else
+		{
+			out.append_string(`[{"type":"text","text":"`);
+			json_escape_into(&out, payload);
+			out.append_string(`"}]`);
+		}
+		out.append_string(`}}`);
 		return out.copy_str(mem);
 	}
 
