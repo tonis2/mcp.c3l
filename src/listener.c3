@@ -314,6 +314,11 @@ fn void answer(TcpSocket socket, String response, Framing framing) @private
 	}
 
 	if (response.len == 0) return;
-	if (!write_all(&writable, response)) return;
-	write_all(&writable, "\n");
+
+	// Through `one_line`, for the reason it gives: this end promises one message
+	// per line and a tool schema written across several would break that promise
+	// at the reader — which, over the relay, is this same library.
+	String line = one_line(response);
+	defer alloc::free(mem, line);
+	write_all(&writable, line);
 }

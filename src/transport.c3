@@ -107,12 +107,55 @@ fn String read_message(InStream stream, Allocator allocator = mem)
 }
 
 <*
+ `json` as one line, with the closing newline on it. Allocated from `allocator`;
+ the caller frees it.
+
+ **The line framing has to keep its own promise.** A tool's `input_schema` is the
+ JSON most likely to have been written across several lines, because it is the
+ part a person reads; spliced into a response those newlines are legal JSON,
+ whitespace between tokens. A reader taking one message per line then stops at the
+ first of them, and what it has is a truncated object — the failure looks like a
+ malformed server rather than a framing mistake, which is what makes it worth
+ fixing here instead of asking every payload to be written flat.
+
+ Replacing them with spaces is safe on any valid payload: a newline inside a
+ string is already escaped as two characters by every writer, so the only ones
+ left are between tokens, where JSON treats all whitespace alike. Two bare tokens
+ that needed a separator cannot be adjacent without a comma in the first place.
+ Carriage returns go the same way, so a schema written on a Windows checkout does
+ not leave a stray CR mid-message.
+
+ HTTP needs none of this: `Content-Length` frames a body of any shape, which is
+ why that path has always carried these payloads intact.
+*>
+fn String one_line(String json, Allocator allocator = mem)
+{
+	DString line = dstring::new(allocator);
+	defer line.free();
+	line.reserve(json.len + 1);
+
+	foreach (character : json)
+	{
+		line.append_char(character == '\n' || character == '\r' ? ' ' : character);
+	}
+	line.append_char('\n');
+	return line.copy_str(allocator);
+}
+
+<*
  Write `json` as one line on stdout, flushed — the stdio transport's answer.
+
+ Built whole and written once. Writing the runs between the newlines as they are
+ found is the obvious shape and truncates: `write` answers with how much it took
+ and a short write is ordinary on a pipe, so a message of any size would arrive
+ cut off at its first newline.
 *>
 fn void send_message(String json)
 {
-	io::stdout().write(json)!!;
-	io::stdout().write("\n")!!;
+	String line = one_line(json);
+	defer alloc::free(mem, line);
+
+	io::stdout().write(line)!!;
 	io::stdout().flush()!!;
 }
 
