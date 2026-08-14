@@ -3,7 +3,12 @@ module mcp;
 import std::io;
 import std::core::mem;
 
-const MAX_TOOLS = 32;
+// Well clear of what is registered rather than snug against it, and the reason
+// is `add_tool`'s assert: overflowing is a runtime abort, and `new_mcp_server`
+// is called per `run_script` as well as at startup — so the tool that did not
+// fit would take down a user's script rather than be refused. The array is by
+// value, so the cost of the headroom is a larger `Server` on the stack.
+const MAX_TOOLS = 48;
 const MAX_RESOURCES = 8;
 
 struct Server {
