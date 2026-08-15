@@ -20,7 +20,7 @@ module my_server;
 
 import mcp;
 import std::collections::object;
-import std::core::mem;
+
 
 // Returns the tool's payload allocated from `mem`; the caller frees it. A
 // fault becomes a JSON-RPC error, carrying whatever was written to `detail`

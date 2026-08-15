@@ -1,6 +1,6 @@
 module mcp;
 
-import std::core::dstring;
+
 
 <*
  Append `s` to `out` with the JSON string escapes applied. The surrounding

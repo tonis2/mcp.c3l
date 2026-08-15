@@ -1,7 +1,7 @@
 module mcp;
 
 import std::io;
-import std::core::mem;
+
 
 // Well clear of what is registered rather than snug against it, and the reason
 // is `add_tool`'s assert: overflowing is a runtime abort, and `new_mcp_server`

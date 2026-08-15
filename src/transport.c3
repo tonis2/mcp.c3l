@@ -1,10 +1,9 @@
 module mcp;
 
 import std::io;
-import std::core::dstring;
-import std::core::mem;
-import std::core::mem::allocator;
-import std::core::string;
+
+
+
 
 <*
  How a request arrived, and therefore how it must be answered. A connection
