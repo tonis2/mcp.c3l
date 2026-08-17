@@ -42,6 +42,28 @@ struct ToolDef {
 	 malformed one is a malformed response.
 	*>
 	bool raw_content;
+
+	<*
+	 Whether `tools/list` leaves this one out.
+
+	 **Hidden is not disabled.** `tools/call` dispatches to it exactly as before,
+	 and so does anything else walking the table — the flag decides what a client
+	 is *told about*, nothing else.
+
+	 A tool description is not free: it sits in the model's context for the whole
+	 session, whether or not the session ever calls it. A server whose surface is
+	 wide and whose calls come in loops — the same handler forty times with
+	 different numbers — pays that toll on every request to save writing forty
+	 loops. Hiding the loop-shaped half and leaving one scripting tool listed
+	 inverts the trade: the description is fetched by a caller that wants it,
+	 rather than pushed at every caller that does not.
+
+	 The cost is real and lands on discovery. A hidden tool is one no client will
+	 volunteer, so a server that hides tools owes its callers another way to find
+	 them — a listed tool that enumerates the rest, which is what crig's
+	 `crig.help()` is.
+	*>
+	bool hidden;
 }
 
 <*

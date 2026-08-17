@@ -97,9 +97,13 @@ fn String Server.on_tools_list(&self, Object* id)
 	defer out.free();
 	append_open(&out, id);
 	out.append_string(`"result":{"tools":[`);
+	// Counted rather than indexed, because `hidden` puts gaps in the walk and the
+	// comma goes before every tool but the first one *written*.
+	usz written = 0;
 	for (usz i = 0; i < self.tools_len; i++)
 	{
-		if (i > 0) out.append_char(',');
+		if (self.tools[i].hidden) continue;
+		if (written++ > 0) out.append_char(',');
 		ToolDef* tool = &self.tools[i];
 		out.append_string(`{"name":"`);
 		json_escape_into(&out, tool.name);

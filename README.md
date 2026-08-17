@@ -118,6 +118,7 @@ ToolDef {
     ToolHandlerFn handler;  // fn String?(Object* args, void* user_data, DString* detail)
     void* user_data;        // Handed back to the handler untouched
     bool raw_content;       // Handler returns the content array, not the text for one
+    bool hidden;            // Left out of tools/list; still dispatched by tools/call
 }
 ```
 
@@ -131,6 +132,8 @@ A fault becomes a JSON-RPC error. Its message is whatever the handler left in `d
 // A raw handler's payload
 `[{"type":"image","mimeType":"image/png","data":"iVBORw0KGgo..."}]`
 ```
+
+`hidden` leaves a tool out of `tools/list` without disabling it — `tools/call` still reaches it, and so does anything else walking the table. It is for a wide surface whose calls arrive in loops: a description sits in the model's context for the whole session whether or not the session uses it, so hiding the loop-shaped half and leaving one scripting tool listed turns a toll paid on every request into a lookup paid by the caller that wants it. The cost lands on discovery — no client will volunteer a hidden tool — so a server that hides tools owes its callers a listed way to enumerate the rest.
 
 ### Resources
 
