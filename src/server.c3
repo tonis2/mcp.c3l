@@ -17,6 +17,23 @@ struct Server {
 	usz tools_len;
 	ResourceDef[MAX_RESOURCES] resources;
 	usz resources_len;
+
+	<*
+	 Who the message being handled came from, or empty.
+
+	 `Listener.pump` sets it from the `Mcp-Session-Id` on the request and clears
+	 it again the moment `handle_message` returns, so it is only meaningful
+	 *inside* a handler and must not be stored — the buffer behind it is freed
+	 with the message. A handler reaches it by holding the server's address in
+	 its `user_data`.
+
+	 It is on the server rather than in the handler signature because most
+	 handlers do not care: a server whose state has one owner never asks. The
+	 ones that do are the ones editing something shared, where the answer to
+	 "who just emptied my document" is the difference between a bug report and a
+	 sentence.
+	*>
+	String session;
 }
 
 fn Server new_server(ServerInfo info)

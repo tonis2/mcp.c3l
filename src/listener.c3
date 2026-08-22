@@ -38,15 +38,17 @@ const usz MAX_PENDING = 16;
 alias WakeFn = fn void(void* ctx);
 
 // One accepted request: the connection it came in on, the message read off it,
-// and the framing it arrived in — which decides how the answer is written, and
-// so has to travel with it. The message is allocated by the listener thread and
-// freed by whoever answers it, so it comes from `Listener.wire` rather than from
-// `mem`, which is a different allocator on each of the two threads.
+// the framing it arrived in — which decides how the answer is written, and so
+// has to travel with it — and who sent it. The message and the session are
+// allocated by the listener thread and freed by whoever answers them, so they
+// come from `Listener.wire` rather than from `mem`, which is a different
+// allocator on each of the two threads.
 struct Pending @private
 {
 	TcpSocket socket;
 	String message;
 	Framing framing;
+	String session;
 }
 
 <*
@@ -164,8 +166,15 @@ fn usz Listener.pump(&self, Server* server)
 		};
 		if (!taken) break;
 
+		// Set for the duration of the call and cleared after it, which is the
+		// whole of the session's life on this side: handlers run here, on this
+		// thread, one at a time, and a handler that stored the pointer would be
+		// holding a buffer freed three lines down.
+		server.session = job.session;
 		String response = server.handle_message(job.message);
+		server.session = "";
 		alloc::free(self.wire, job.message);
+		if (job.session.len > 0) alloc::free(self.wire, job.session);
 		answer(job.socket, response, job.framing);
 		if (response.len > 0) alloc::free(mem, response);
 		handled++;
@@ -206,6 +215,7 @@ fn void Listener.stop(&self)
 		self.head = (self.head + 1) % MAX_PENDING;
 		self.count--;
 		alloc::free(self.wire, job.message);
+		if (job.session.len > 0) alloc::free(self.wire, job.session);
 		(void)job.socket.close();
 	}
 
@@ -248,13 +258,21 @@ fn int accept_loop(void* arg) @private
 		}
 		if (request.body.len == 0)
 		{
+			// A session with no message to carry has nobody to be told to.
+			if (request.session.len > 0) alloc::free(self.wire, request.session);
 			(void)socket.close();
 			continue;
 		}
 
-		if (!self.offer({ .socket = socket, .message = request.body, .framing = request.framing }))
+		if (!self.offer({
+			.socket = socket,
+			.message = request.body,
+			.framing = request.framing,
+			.session = request.session,
+		}))
 		{
 			alloc::free(self.wire, request.body);
+			if (request.session.len > 0) alloc::free(self.wire, request.session);
 			String busy = error_message(null, INTERNAL_ERROR, "Server busy: too many requests in flight");
 			answer(socket, busy, request.framing);
 			alloc::free(mem, busy);

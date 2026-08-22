@@ -34,6 +34,18 @@ struct Incoming
 	// caller frees it. Empty on EOF, and on an HTTP request that carried no body.
 	String body;
 
+	// Who is asking, from the `Mcp-Session-Id` header, and allocated and freed
+	// exactly like `body`. Empty when the client sent none, which is every
+	// client that is not the relay — a `curl` by hand, or an older relay — and
+	// is a legitimate answer rather than a failure.
+	//
+	// It is here because one connection carries one message and is then closed:
+	// there is no connection for a server to hang a session on, so identity
+	// either rides on the message or does not exist. A server that has several
+	// clients editing one document needs it to say which of them did something,
+	// and one that has a single client can ignore the field entirely.
+	String session;
+
 	// An HTTP request that is not a POST. There is nothing to hand a server, and
 	// the answer is 405 rather than silence — a client probing for a stream it
 	// cannot have should be told so, not left hanging.
@@ -50,7 +62,7 @@ struct Incoming
 
  A zero-length body with nothing refused is EOF.
 
- @param allocator : `Where the body is allocated. Name one explicitly when the buffer is freed on a different thread than this call runs on: the default is per-thread, so the two sides would otherwise be different allocators.`
+ @param allocator : `Where the body and the session are allocated. Name one explicitly when the buffers are freed on a different thread than this call runs on: the default is per-thread, so the two sides would otherwise be different allocators.`
 *>
 fn Incoming read_request(InStream stream, Allocator allocator = mem)
 {
@@ -70,9 +82,19 @@ fn Incoming read_request(InStream stream, Allocator allocator = mem)
 		{
 			return { .framing = HTTP, .refused = true };
 		}
-		usz length = read_headers(stream);
-		if (length == 0) return { .framing = HTTP };
-		return { .framing = HTTP, .body = read_body(stream, length, allocator) };
+		Headers headers = read_headers(stream, allocator);
+		// Freed rather than carried out: there is no body to answer for, so
+		// nothing downstream will ever see this `Incoming` again to free it.
+		if (headers.length == 0)
+		{
+			if (headers.session.len > 0) alloc::free(allocator, headers.session);
+			return { .framing = HTTP };
+		}
+		return {
+			.framing = HTTP,
+			.body = read_body(stream, headers.length, allocator),
+			.session = headers.session,
+		};
 	}
 
 	if (line.contains("Content-Length:"))
@@ -83,8 +105,13 @@ fn Incoming read_request(InStream stream, Allocator allocator = mem)
 			length = (usz)(line[pos + 15..].trim().to_uint() ?? 0);
 		}
 		if (length == 0) return {};
-		read_headers(stream);
-		return { .body = read_body(stream, length, allocator) };
+		// The length is on the first line and the rest of the headers follow it,
+		// which is why the relay writes `Content-Length` first: a message whose
+		// first header is anything else is read as a bare JSON line by the
+		// branch below and comes apart. Everything after it is free to be in any
+		// order, and `Mcp-Session-Id` is what the relay puts there.
+		Headers headers = read_headers(stream, allocator);
+		return { .body = read_body(stream, length, allocator), .session = headers.session };
 	}
 
 	return { .body = first.copy_str(allocator) };
@@ -102,7 +129,12 @@ fn Incoming read_request(InStream stream, Allocator allocator = mem)
 *>
 fn String read_message(InStream stream, Allocator allocator = mem)
 {
-	return read_request(stream, allocator).body;
+	Incoming incoming = read_request(stream, allocator);
+	// The session goes the way of the framing, and for the same reason: a caller
+	// that answers the same way whatever arrives has nothing to tell clients
+	// apart *for*, and it is allocated, so dropping it silently would leak.
+	if (incoming.session.len > 0) alloc::free(allocator, incoming.session);
+	return incoming.body;
 }
 
 <*
@@ -240,27 +272,51 @@ fn bool read_line(InStream stream, DString* into) @private
 	}
 }
 
-// Headers to the blank line, reporting whatever Content-Length said. Zero when
-// the headers named none, which for a body-carrying request means "nothing to
-// read" rather than "read to EOF" — this transport has no chunked decoder.
-fn usz read_headers(InStream stream) @private
+// The two things this transport reads out of a header block. Everything else
+// is skipped: a header a server does not understand is not an error, and a
+// client is free to send as many as it likes.
+struct Headers @private
 {
-	usz length = 0;
+	usz length;
+	String session;
+}
+
+// Headers to the blank line. `length` is whatever Content-Length said, and zero
+// when the headers named none — which for a body-carrying request means
+// "nothing to read" rather than "read to EOF": this transport has no chunked
+// decoder. `session` is the `Mcp-Session-Id`, allocated from `allocator` and
+// empty when unsent; the caller owns it.
+fn Headers read_headers(InStream stream, Allocator allocator) @private
+{
+	Headers headers;
 	while (true)
 	{
 		DString header = dstring::new(mem);
 		defer header.free();
-		if (!read_line(stream, &header)) return length;
+		if (!read_line(stream, &header)) return headers;
 
 		String line = header.str_view();
-		if (line.len == 0) return length;
+		if (line.len == 0) return headers;
 
 		// Header names are case-insensitive, and a client that sends
 		// `content-length` is within its rights.
 		usz split = (usz)(line.index_of_char(':') ?? (long)line.len);
 		if (split >= line.len) continue;
-		if (line[:split].compare_to_ignore_case("Content-Length") != 0) continue;
-		length = (usz)(line[split + 1..].trim().to_uint() ?? 0);
+		String name = line[:split];
+		String value = line[split + 1..].trim();
+
+		if (name.compare_to_ignore_case("Content-Length") == 0)
+		{
+			headers.length = (usz)(value.to_uint() ?? 0);
+			continue;
+		}
+		if (name.compare_to_ignore_case("Mcp-Session-Id") == 0)
+		{
+			// Last one wins, and the first is released rather than leaked: a
+			// client that repeats a header is malformed, not dangerous.
+			if (headers.session.len > 0) alloc::free(allocator, headers.session);
+			headers.session = value.len > 0 ? value.copy(allocator) : "";
+		}
 	}
 }
 
