@@ -8,7 +8,7 @@ import std::io;
 // is called per `run_script` as well as at startup — so the tool that did not
 // fit would take down a user's script rather than be refused. The array is by
 // value, so the cost of the headroom is a larger `Server` on the stack.
-const MAX_TOOLS = 48;
+const MAX_TOOLS = 128;
 const MAX_RESOURCES = 8;
 
 struct Server {
